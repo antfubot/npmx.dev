@@ -1,8 +1,23 @@
+import { compare, isPrerelease, isStable } from 'verkit'
 import { normalizeLicense } from '#shared/utils/npm'
 
 interface LicenseChangeRecord {
   from: string
   to: string
+}
+
+/**
+ * The previous version in semver order (not publish time), so back-ported
+ * releases don't produce misleading cross-line license diffs. Mirrors the
+ * install-size callout: pre-releases compare against the highest stable below
+ * them; stable versions compare against the previous stable.
+ */
+function getSemverComparisonVersion(stableVersions: string[], target: string): string | null {
+  if (isPrerelease(target)) {
+    return stableVersions.findLast(v => compare(v, target) < 0) ?? null
+  }
+  const currentIndex = stableVersions.indexOf(target)
+  return currentIndex > 0 ? (stableVersions[currentIndex - 1] ?? null) : null
 }
 
 export default defineCachedEventHandler(
@@ -29,27 +44,25 @@ export default defineCachedEventHandler(
           statusMessage: 'Package metadata not found',
         })
       }
-      // 3. Process the logic
-      const versions = Object.values(data.versions)
+      // 3. Process the logic — compare against the previous version in semver order
+      const stableVersions = Object.keys(data.versions)
+        .filter(v => data.time[v] && isStable(v))
+        .sort(compare)
 
-      // Sort versions chronologically using the 'time' object
-      versions.sort((a, b) => {
-        const timeA = new Date(data.time[a.version] as string).getTime()
-        const timeB = new Date(data.time[b.version] as string).getTime()
-        return timeA - timeB
-      })
+      const targetVersion =
+        version === 'latest' ? (data['dist-tags']?.latest ?? stableVersions.at(-1)) : String(version)
+
       let change: LicenseChangeRecord | null = null
 
-      const currentVersionIndex =
-        version === 'latest' ? versions.length - 1 : versions.findIndex(v => v.version === version)
-
-      const previousVersionIndex = currentVersionIndex - 1
+      const comparisonVersion = targetVersion
+        ? getSemverComparisonVersion(stableVersions, targetVersion)
+        : null
 
       // Skip when there's no real previous version, else we'd diff against a phantom 'UNKNOWN'.
-      if (currentVersionIndex > 0) {
-        const currentLicense = normalizeLicense(versions[currentVersionIndex]?.license) ?? 'UNKNOWN'
+      if (targetVersion && comparisonVersion) {
+        const currentLicense = normalizeLicense(data.versions[targetVersion]?.license) ?? 'UNKNOWN'
         const previousLicense =
-          normalizeLicense(versions[previousVersionIndex]?.license) ?? 'UNKNOWN'
+          normalizeLicense(data.versions[comparisonVersion]?.license) ?? 'UNKNOWN'
 
         if (currentLicense !== previousLicense) {
           change = {
@@ -82,7 +95,7 @@ export default defineCachedEventHandler(
 
       // 3. Create a unique string such that it takes into account the pckage name and version
       // sample result: "license-change:v1:faker:2.1.15"
-      return `license-change:v2:${cleanPkg}:${version}`
+      return `license-change:v3:${cleanPkg}:${version}`
     },
   },
 )
